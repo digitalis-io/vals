@@ -41,6 +41,18 @@ type provider struct {
 	PasswordEnv  string
 	PasswordFile string
 	Version      string
+
+	// kvVersionCache caches isKVv2 preflight results per mount path, so each
+	// mount only costs one Vault API call regardless of how many secrets are read.
+	kvVersionCache map[string]kvVersionResult
+	// secretMapCache caches GetStringMap results per secret path, so multiple
+	// keys under the same path only cost one Vault read.
+	secretMapCache map[string]map[string]interface{}
+}
+
+type kvVersionResult struct {
+	mountPath string
+	v2        bool
 }
 
 func New(l *log.Logger, cfg api.StaticConfig) *provider {
@@ -104,6 +116,8 @@ func New(l *log.Logger, cfg api.StaticConfig) *provider {
 		p.PasswordFile = os.Getenv("VAULT_PASSWORD_FILE")
 	}
 	p.Version = cfg.String("version")
+	p.kvVersionCache = make(map[string]kvVersionResult)
+	p.secretMapCache = make(map[string]map[string]interface{})
 
 	return p
 }
@@ -131,30 +145,41 @@ func (p *provider) GetString(key string) (string, error) {
 }
 
 func (p *provider) GetStringMap(key string) (map[string]interface{}, error) {
+	if cached, ok := p.secretMapCache[key]; ok {
+		return cached, nil
+	}
+
 	cli, err := p.ensureClient()
 	if err != nil {
 		return nil, fmt.Errorf("Cannot create Vault Client: %v", err)
 	}
 
-	mountPath, v2, err := isKVv2(key, cli)
-	if err != nil {
-		return nil, err
+	var mountPath string
+	var v2 bool
+	if cached, ok := p.kvVersionCache[key]; ok {
+		mountPath = cached.mountPath
+		v2 = cached.v2
+	} else {
+		mountPath, v2, err = isKVv2(key, cli)
+		if err != nil {
+			return nil, err
+		}
+		p.kvVersionCache[key] = kvVersionResult{mountPath: mountPath, v2: v2}
 	}
 
+	readKey := key
 	if v2 {
-		key = addPrefixToVKVPath(key, mountPath, "data")
+		readKey = addPrefixToVKVPath(key, mountPath, "data")
 	}
-
-	res := map[string]interface{}{}
 
 	data := map[string][]string{}
 	if p.Version != "" {
 		data["version"] = []string{p.Version}
 	}
 
-	secret, err := cli.Logical().ReadWithData(key, data)
+	secret, err := cli.Logical().ReadWithData(readKey, data)
 	if err != nil {
-		p.log.Debugf("vault: read: key=%q", key)
+		p.log.Debugf("vault: read: key=%q", readKey)
 		return nil, err
 	}
 
@@ -174,9 +199,12 @@ func (p *provider) GetStringMap(key string) (map[string]interface{}, error) {
 		}
 	}
 
+	res := make(map[string]interface{}, len(secrets))
 	for k, v := range secrets {
 		res[k] = v
 	}
+
+	p.secretMapCache[key] = res
 
 	return res, nil
 }
