@@ -28,6 +28,13 @@ type provider struct {
 	client *vault.Client
 	log    *log.Logger
 
+	// kvVersionCache caches isKVv2 preflight results per mount path, so each
+	// mount only costs one Vault API call regardless of how many secrets are read.
+	kvVersionCache map[string]kvVersionResult
+	// secretMapCache caches GetStringMap results per secret path, so multiple
+	// keys under the same path only cost one Vault read.
+	secretMapCache map[string]map[string]interface{}
+
 	Address      string
 	Namespace    string
 	Proto        string
@@ -41,13 +48,6 @@ type provider struct {
 	PasswordEnv  string
 	PasswordFile string
 	Version      string
-
-	// kvVersionCache caches isKVv2 preflight results per mount path, so each
-	// mount only costs one Vault API call regardless of how many secrets are read.
-	kvVersionCache map[string]kvVersionResult
-	// secretMapCache caches GetStringMap results per secret path, so multiple
-	// keys under the same path only cost one Vault read.
-	secretMapCache map[string]map[string]interface{}
 }
 
 type kvVersionResult struct {
